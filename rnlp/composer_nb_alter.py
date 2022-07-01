@@ -62,10 +62,18 @@ class ComposerTrainer:
         self.optimizer = optimizer
         self.lr_schedule = lr_schedule
         self.batch_size = batch_size
+        def tokenize(sample):
+            return tokenizer(
+                text=sample['sentence'],
+                padding='max_length',
+                max_length=256,
+                truncation=True
+            )
+        self.tokenize = tokenize
 
     def process_data(self, dataset):
         if self.tokenizer is not None:
-            tokenized = dataset.map(self._tokenize, batched=True, num_proc=multiprocessing.cpu_count(), batch_size=1000, remove_columns=['idx', 'sentence'])
+            tokenized = dataset.map(self.tokenize, batched=True, num_proc=multiprocessing.cpu_count(), batch_size=1000, remove_columns=['idx', 'sentence'])
         else:
             tokenized = dataset
         data_collator = transformers.data.data_collator.default_data_collator
@@ -74,8 +82,7 @@ class ComposerTrainer:
         return dataspec
 
     def fit(self, train_data, eval_data, duration='1ep', num_batches=150, seed=17, precision='fp32'):
-        #train_data = self.process_data(train_data)
-        #eval_data = self.process_data(eval_data)
+        # Create Trainer Object
         trainer = composer.Trainer(
             model=self.model,
             train_dataloader=train_data,
@@ -91,14 +98,6 @@ class ComposerTrainer:
         # Start training
         trainer.fit()
         
-
-    def _tokenize(self, sample):
-        return self.tokenizer(
-            text=sample['sentence'],
-            padding='max_length',
-            max_length=256,
-            truncation=True
-        )
 
     def _split_batch_dict(self, batch, n_microbatches: int):
         chunked = {k: v.chunk(n_microbatches) for k, v in batch.items()}
@@ -118,50 +117,15 @@ linear_lr_decay = torch.optim.lr_scheduler.LinearLR(
     end_factor=0, total_iters=150
 )
 
+#import pdb; pdb.set_trace()
 my_trainer = ComposerTrainer(composer_model, tokenizer, optimizer, linear_lr_decay, batch_size=16)
 
 # Tokenize SST-2
 # Split dataset into train and validation sets
 sst2_dataset = datasets.load_dataset('glue', 'sst2')
-def process_data(trainer, dataset):
-        def tokenize(sample):
-            #assert tokenizer is trainer.tokenizer
-            import pdb; pdb.set_trace()
-            tokenizer = trainer.tokenizer
-            return tokenizer(
-                text=sample['sentence'],
-                padding='max_length',
-                max_length=256,
-                truncation=True
-            )
-        if tokenizer is not None:
-            tokenized = dataset.map(tokenize, batched=True, num_proc=multiprocessing.cpu_count(), batch_size=1000, remove_columns=['idx', 'sentence'])
-        else:
-            tokenized = dataset
-        data_collator = transformers.data.data_collator.default_data_collator
-        dataloader = torch.utils.data.DataLoader(tokenized, batch_size=trainer.batch_size, shuffle=False, drop_last=False, collate_fn=data_collator)
-        dataspec = composer.core.DataSpec(dataloader=dataloader, split_batch=trainer._split_batch_dict)
-        return dataspec
-#train_dataspec, eval_dataspec = my_trainer.process_data(sst2_dataset['train']), my_trainer.process_data(sst2_dataset['validation'])
-train_dataspec = process_data(my_trainer, sst2_dataset['train'])
-eval_dataspec = process_data(my_trainer, sst2_dataset['validation'])
+train_dataspec, eval_dataspec = my_trainer.process_data(sst2_dataset['train']), my_trainer.process_data(sst2_dataset['validation'])
 
-#my_trainer.fit(train_dataspec, eval_dataspec)
-# Create Trainer Object
-trainer = composer.Trainer(
-    model=composer_model,
-    train_dataloader=train_dataspec,
-    eval_dataloader=eval_dataspec,
-    max_duration="1ep",
-    optimizers=my_trainer.optimizer,
-    schedulers=my_trainer.lr_schedule,#[linear_lr_decay],
-    device='gpu' if torch.cuda.is_available() else 'cpu',
-    train_subset_num_batches=150,
-    precision='fp32',
-    seed=17
-)
-# Start training
-trainer.fit()
+my_trainer.fit(train_dataspec, eval_dataspec)
 
 eval_batch = next(iter(eval_dataspec.dataloader))
 
