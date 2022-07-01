@@ -70,11 +70,11 @@ import torch, transformers
 # Create a BERT sequence classification model using HuggingFace transformers
 #model = transformers.AutoModelForSequenceClassification.from_pretrained('bert-base-uncased', num_labels=2) # in BERT hparams
 #model = transformers.AutoModelForSequenceClassification.from_pretrained('prajjwal1/bert-tiny', num_labels=2) # in BERT hparams
-model = transformers.AutoModelForCausalLM.from_pretrained('openai-gpt')
+model = transformers.AutoModelForCausalLM.from_pretrained('facebook/opt-125m')
 
 # Create BERT tokenizer
 #tokenizer = transformers.AutoTokenizer.from_pretrained('bert-base-uncased') # from transfomer_shared
-tokenizer = transformers.AutoTokenizer.from_pretrained('openai-gpt')
+tokenizer = transformers.AutoTokenizer.from_pretrained('facebook/opt-125m')
 if tokenizer.pad_token_id is None:
     if tokenizer.eos_token_id is None:
         tokenizer.pad_token_id = tokenizer.unk_token_id
@@ -109,16 +109,15 @@ class ComposerTrainer:
 
     def dataset_tokenize(self, dataset, input_col, label_col=None, **kwparams):
         tokenizer = self.tokenizer
+        kwparams = {'padding':'max_length', 'max_length':256, **kwparams}
         if label_col is None:
-            kwparams = {'padding':'max_length', **kwparams}
             def tokenize(sample):
                 return tokenizer(
                     text=sample[input_col],
                     **kwparams
                 )
         elif label_col == input_col:
-            kwparams = {'return_tensors':'np', **kwparams}
-            kwparams = {'padding':'max_length', **kwparams}
+            kwparams = {'return_tensors':'np', 'max_length':kwparams['max_length']+1,**kwparams}
             def tokenize(sample):
                 tokenized = tokenizer(
                     text=sample[input_col],
@@ -128,6 +127,8 @@ class ComposerTrainer:
                 tokenized['label'][tokenized['attention_mask'][...,1:] == 0] = -100
                 tokenized['input_ids'] = tokenized['input_ids'][...,:-1]
                 tokenized['attention_mask'] = tokenized['attention_mask'][...,:-1]
+                assert len(tokenized['input_ids']) == len(tokenized['attention_mask'])
+                assert len(tokenized['label']) == len(tokenized['input_ids'])
                 return tokenized
         else:
             def tokenize(sample):
@@ -140,24 +141,22 @@ class ComposerTrainer:
                     text=sample[label_col],
                     **kwparams
                 )
-                max_length = max((len(input_ids) + len(label_ids) - 1) for input_ids, label_ids in zip(input_ids['input_ids'], label_ids['input_ids']))
+                #max_length = max((len(input_ids) + len(label_ids) - 1) for input_ids, label_ids in zip(input_ids['input_ids'], label_ids['input_ids']))
+                max_length = kwparams['max_length']
+                if len(input_ids) >= max_length:
+                    print('warning: item length leaves no room for generation within max length')
+                tokenized_input_ids = input_ids + label_ids[:-1][:max_length]
+                tokenized_input_ids += [tokenizer.pad_token_id] * (max_length - len(tokenized_input_ids))
+                tokenized_attention_mask = [1] * min(len(input_ids) + len(label_ids) - 1, max_length)
+                tokenized_attention_mask += [0] * (max_length - len(tokenized_attention_mask))
+                tokenized_labels = ([-100] * (len(input_ids) - 1) + label_ids)[:max_length]
+                tokenized_labels += [-100] * (max_length - len(tokenized_labels))
                 return {
-                    'input_ids': input_ids + label_ids[:-1] + [tokenizer.pad_token_id] * (max_length - len(input_ids) - len(label_ids) + 1),
-                    'attention_mask': [1] * (len(input_ids) + len(label_ids) - 1) + [0] * (max_length - len(input_ids) - len(label_ids)),
-                    'label': [-100] * (len(input_ids) - 1) + label_ids + [-100] * (max_length - len(input_ids) - len(label_ids) + 1)
+                    'input_ids': tokenized_input_ids,
+                    'attention_mask': tokenized_attention_mask,
+                    'label': tokenized_labels
                 }
         return dataset.map(tokenize, batched=True, num_proc=multiprocessing.cpu_count(), batch_size=1000, remove_columns=['idx', 'sentence'])
-
-
-    #def dataset_tokenize_col(self, dataset, col, **kwparams):
-    #    tokenizer = self.tokenizer
-    #    kwparams = {'padding':'max_length', **kwparams}
-    #    def tokenize(sample):
-    #        return tokenizer(
-    #            text=sample[col],
-    #            **kwparams
-    #        )
-    #    return dataset.map(tokenize, batched=True, num_proc=multiprocessing.cpu_count(), batch_size=1000, remove_columns=['idx', 'sentence'])
 
     def process_data(self, dataset):
         data_collator = transformers.data.data_collator.default_data_collator
