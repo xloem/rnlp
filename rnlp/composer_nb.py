@@ -130,5 +130,5 @@ for i, prediction in enumerate(predictions[:6]):
     prediction_label = label[prediction]
     print(f'Sample: {sentence}')
     print(f'Label: {correct_label}')
-    print(f'Prediction: {predictionlabel}')
+    print(f'Prediction: {prediction_label}')
     print()
