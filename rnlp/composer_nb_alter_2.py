@@ -65,7 +65,7 @@ class ComposerGPT(composer.models.base.ComposerModel):
 
 import torch, transformers
 
-#torch.cuda.is_available = lambda: False
+torch.cuda.is_available = lambda: False
 
 # Create a BERT sequence classification model using HuggingFace transformers
 #model = transformers.AutoModelForSequenceClassification.from_pretrained('bert-base-uncased', num_labels=2) # in BERT hparams
@@ -107,9 +107,10 @@ class ComposerTrainer:
         self.lr_schedule = lr_schedule
         self.batch_size = batch_size
 
-    def dataset_tokenize(self, dataset, input_col, label_col=None, **kwparams):
+    def dataset_tokenize(self, dataset, input_col, label_col=None, remove_cols=[], **kwparams):
         tokenizer = self.tokenizer
         kwparams = {'padding':'max_length', 'max_length':256, **kwparams}
+        remove_cols = [*remove_cols, input_col]
         if label_col is None:
             def tokenize(sample):
                 return tokenizer(
@@ -117,20 +118,20 @@ class ComposerTrainer:
                     **kwparams
                 )
         elif label_col == input_col:
+            remove_cols = [*remove_cols, 'label']
             kwparams = {'return_tensors':'np', 'max_length':kwparams['max_length']+1,**kwparams}
             def tokenize(sample):
                 tokenized = tokenizer(
                     text=sample[input_col],
                     **kwparams
                 )
-                tokenized['label'] = tokenized['input_ids'][...,1:].copy()
-                tokenized['label'][tokenized['attention_mask'][...,1:] == 0] = -100
+                tokenized['label_ids'] = tokenized['input_ids'][...,1:].copy()
+                tokenized['label_ids'][tokenized['attention_mask'][...,1:] == 0] = -100
                 tokenized['input_ids'] = tokenized['input_ids'][...,:-1]
                 tokenized['attention_mask'] = tokenized['attention_mask'][...,:-1]
-                assert len(tokenized['input_ids']) == len(tokenized['attention_mask'])
-                assert len(tokenized['label']) == len(tokenized['input_ids'])
                 return tokenized
         else:
+            remove_cols = [*remove_cols, label_col, 'label']
             def tokenize(sample):
                 # here we concatenate the input and label ids as if labels follow input, such that only the labels are trained on
                 input_ids = tokenizer(
@@ -149,18 +150,20 @@ class ComposerTrainer:
                 tokenized_input_ids += [tokenizer.pad_token_id] * (max_length - len(tokenized_input_ids))
                 tokenized_attention_mask = [1] * min(len(input_ids) + len(label_ids) - 1, max_length)
                 tokenized_attention_mask += [0] * (max_length - len(tokenized_attention_mask))
-                tokenized_labels = ([-100] * (len(input_ids) - 1) + label_ids)[:max_length]
-                tokenized_labels += [-100] * (max_length - len(tokenized_labels))
+                tokenized_label_ids = ([-100] * (len(input_ids) - 1) + label_ids)[:max_length]
+                tokenized_label_ids += [-100] * (max_length - len(tokenized_label_ids))
                 return {
                     'input_ids': tokenized_input_ids,
                     'attention_mask': tokenized_attention_mask,
-                    'label': tokenized_labels
+                    'label_ids': tokenized_label_ids
                 }
-        return dataset.map(tokenize, batched=True, num_proc=multiprocessing.cpu_count(), batch_size=1000, remove_columns=['idx', 'sentence'])
+        return dataset.map(tokenize, batched=True, num_proc=multiprocessing.cpu_count(), batch_size=1000, remove_columns=remove_cols)
 
     def process_data(self, dataset):
         data_collator = transformers.data.data_collator.default_data_collator
-        dataloader = torch.utils.data.DataLoader(dataset, batch_size=self.batch_size, shuffle=False, drop_last=False, collate_fn=data_collator)
+        def data_collator_wrapper(*params, **kwparams):
+            return data_collator(*params, **kwparams)
+        dataloader = torch.utils.data.DataLoader(dataset, batch_size=self.batch_size, shuffle=False, drop_last=False, collate_fn=data_collator_wrapper)
         dataspec = composer.core.DataSpec(dataloader=dataloader, split_batch=self._split_batch_dict)
         return dataspec
 
@@ -214,7 +217,7 @@ my_trainer = ComposerTrainer(composer_model, tokenizer, optimizer, linear_lr_dec
 # Split dataset into train and validation sets
 sst2_dataset = datasets.load_dataset('glue', 'sst2')
 #tokenized_sst2 = my_trainer.dataset_tokenize_col(sst2_dataset, 'sentence')
-tokenized_sst2 = my_trainer.dataset_tokenize(sst2_dataset, 'sentence', 'sentence')
+tokenized_sst2 = my_trainer.dataset_tokenize(sst2_dataset, 'sentence', 'sentence', remove_cols=['idx'])
 train_dataspec, eval_dataspec = my_trainer.process_data(tokenized_sst2['train']), my_trainer.process_data(tokenized_sst2['validation'])
 
 my_trainer.fit(train_dataspec, eval_dataspec)
