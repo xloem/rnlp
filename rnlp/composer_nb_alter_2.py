@@ -65,6 +65,8 @@ class ComposerGPT(composer.models.base.ComposerModel):
 
 import torch, transformers
 
+#torch.cuda.is_available = lambda: False
+
 # Create a BERT sequence classification model using HuggingFace transformers
 #model = transformers.AutoModelForSequenceClassification.from_pretrained('bert-base-uncased', num_labels=2) # in BERT hparams
 #model = transformers.AutoModelForSequenceClassification.from_pretrained('prajjwal1/bert-tiny', num_labels=2) # in BERT hparams
@@ -122,7 +124,7 @@ class ComposerTrainer:
                     text=sample[input_col],
                     **kwparams
                 )
-                tokenized['label'] = tokenized['input_ids'][...,1:]
+                tokenized['label'] = tokenized['input_ids'][...,1:].copy()
                 tokenized['label'][tokenized['attention_mask'][...,1:] == 0] = -100
                 tokenized['input_ids'] = tokenized['input_ids'][...,:-1]
                 tokenized['attention_mask'] = tokenized['attention_mask'][...,:-1]
