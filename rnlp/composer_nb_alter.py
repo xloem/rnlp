@@ -1,10 +1,6 @@
-# this is revised from composer's example nlp notebook, to try to have something that works
+#sst2_dataset this is revised from composer's example nlp notebook, to try to have something that works
 
 # Define a Composer Model
-#from torchmetrics import Accuracy
-#from torchmetrics.collections import MetricCollection
-#from composer.models.base import ComposerModel
-#from composer.metrics import CrossEntropy
 import torchmetrics
 import composer.models.base
 import composer.metrics
@@ -41,7 +37,7 @@ import torch, transformers
 
 # Create a BERT sequence classification model using HuggingFace transformers
 #model = transformers.AutoModelForSequenceClassification.from_pretrained('bert-base-uncased', num_labels=2) # in BERT hparams
-model = transformers.AutoModelForSequenceClassification.from_pretrained('prajjwal1/bert-small', num_labels=2) # in BERT hparams
+model = transformers.AutoModelForSequenceClassification.from_pretrained('prajjwal1/bert-tiny', num_labels=2) # in BERT hparams
 
 # Create BERT tokenizer
 tokenizer = transformers.AutoTokenizer.from_pretrained('bert-base-uncased') # from transfomer_shared
@@ -62,22 +58,20 @@ class ComposerTrainer:
         self.optimizer = optimizer
         self.lr_schedule = lr_schedule
         self.batch_size = batch_size
+
+    def dataset_tokenize_col(self, dataset, col, **kwparams):
+        tokenizer = self.tokenizer
+        kwparams = {'padding':'max_length', **kwparams}
         def tokenize(sample):
             return tokenizer(
-                text=sample['sentence'],
-                padding='max_length',
-                max_length=256,
-                truncation=True
+                text=sample[col],
+                **kwparams
             )
-        self.tokenize = tokenize
+        return dataset.map(tokenize, batched=True, num_proc=multiprocessing.cpu_count(), batch_size=1000, remove_columns=['idx', 'sentence'])
 
     def process_data(self, dataset):
-        if self.tokenizer is not None:
-            tokenized = dataset.map(self.tokenize, batched=True, num_proc=multiprocessing.cpu_count(), batch_size=1000, remove_columns=['idx', 'sentence'])
-        else:
-            tokenized = dataset
         data_collator = transformers.data.data_collator.default_data_collator
-        dataloader = torch.utils.data.DataLoader(tokenized, batch_size=self.batch_size, shuffle=False, drop_last=False, collate_fn=data_collator)
+        dataloader = torch.utils.data.DataLoader(dataset, batch_size=self.batch_size, shuffle=False, drop_last=False, collate_fn=data_collator)
         dataspec = composer.core.DataSpec(dataloader=dataloader, split_batch=self._split_batch_dict)
         return dataspec
 
@@ -97,8 +91,16 @@ class ComposerTrainer:
         )
         # Start training
         trainer.fit()
-        
 
+    def predict(self, eval_batch, logits=False):
+        # Move batch to gpu
+        eval_batch = {k: v.cuda() if torch.cuda.is_available() else v for k, v in eval_batch.items()}
+        with torch.no_grad():
+            predictions = self.model(eval_batch)['logits']
+            if not logits:
+                predictions = predictions.argmax(dim=1)
+        return predictions
+        
     def _split_batch_dict(self, batch, n_microbatches: int):
         chunked = {k: v.chunk(n_microbatches) for k, v in batch.items()}
         num_chunks = len(list(chunked.values())[0])
@@ -117,22 +119,23 @@ linear_lr_decay = torch.optim.lr_scheduler.LinearLR(
     end_factor=0, total_iters=150
 )
 
-#import pdb; pdb.set_trace()
 my_trainer = ComposerTrainer(composer_model, tokenizer, optimizer, linear_lr_decay, batch_size=16)
 
 # Tokenize SST-2
 # Split dataset into train and validation sets
 sst2_dataset = datasets.load_dataset('glue', 'sst2')
-train_dataspec, eval_dataspec = my_trainer.process_data(sst2_dataset['train']), my_trainer.process_data(sst2_dataset['validation'])
+tokenized_sst2 = my_trainer.dataset_tokenize_col(sst2_dataset, 'sentence')
+train_dataspec, eval_dataspec = my_trainer.process_data(tokenized_sst2['train']), my_trainer.process_data(tokenized_sst2['validation'])
 
 my_trainer.fit(train_dataspec, eval_dataspec)
 
 eval_batch = next(iter(eval_dataspec.dataloader))
-
-# Move batch to gpu
-eval_batch = {k: v.cuda() if torch.cuda.is_available() else v for k, v in eval_batch.items()}
-with torch.no_grad():
-    predictions = my_trainer.model(eval_batch)['logits'].argmax(dim=1)
+predictions = my_trainer.predict(eval_batch)
+#
+## Move batch to gpu
+#eval_batch = {k: v.cuda() if torch.cuda.is_available() else v for k, v in eval_batch.items()}
+#with torch.no_grad():
+#    predictions = my_trainer.model(eval_batch)['logits'].argmax(dim=1)
 
 # Visualize only 5 samples
 predictions = predictions[:6]
