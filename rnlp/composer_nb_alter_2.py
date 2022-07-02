@@ -2,6 +2,8 @@
 
 # note: for gpt-2, the appropriate acceleration is to replace attention with alibi, and perform sequence length warmup
 
+# NOTE NOTE: tokenizers can pad to 'longest' instead of 'max_length', not implemented yet
+
 # Define a Composer Model
 import torchmetrics
 import composer.models.base
@@ -97,6 +99,7 @@ class ComposerTrainer:
         self.optimizer = optimizer
         self.lr_schedule = lr_schedule
         self.batch_size = batch_size
+        self.one_time = True
 
     def dataset_tokenize(self, dataset, input_col, label_col=None, remove_cols=[], **kwparams):
         kwparams = {'padding':'max_length', 'max_length':256, **kwparams}
@@ -104,10 +107,10 @@ class ComposerTrainer:
         if label_col is None:
             tokenizer = self._tokenize_input
         elif label_col == input_col:
-            remove_cols = [*remove_cols, 'label']
+            remove_cols = [*remove_cols]
             tokenizer = self._tokenize_input_as_labels
         else:
-            remove_cols = [*remove_cols, label_col, 'label']
+            remove_cols = [*remove_cols, label_col]
             tokenizer = self._tokenize_input_concat_labels
             kwparams = {'label_col':label_col,**kwparams}
         return dataset.map(tokenizer, batched=True, num_proc=multiprocessing.cpu_count(), batch_size=1000, remove_columns=remove_cols, fn_kwargs={'tokenizer':self.tokenizer, 'input_col':input_col, **kwparams})
@@ -128,17 +131,31 @@ class ComposerTrainer:
     @staticmethod
     def _tokenize_input_concat_labels(sample, *, tokenizer, input_col, label_col, **kwparams):
         # here we concatenate the input and label ids as if labels follow input, such that only the labels are trained on
-        input_ids = tokenizer(text = sample[input_col], **kwparams)
-        label_ids = tokenizer(text = sample[label_col], **kwparams)
         max_length = kwparams['max_length']
-        if len(input_ids) >= max_length:
-            print('warning: item length leaves no room for generation within max length')
-        tokenized_input_ids = (input_ids + label_ids[:-1])[:max_length]
-        tokenized_input_ids += [tokenizer.pad_token_id] * (max_length - len(tokenized_input_ids))
-        tokenized_attention_mask = [1] * min(len(input_ids) + len(label_ids) - 1, max_length)
-        tokenized_attention_mask += [0] * (max_length - len(tokenized_attention_mask))
-        tokenized_label_ids = ([-100] * (len(input_ids) - 1) + label_ids)[:max_length]
-        tokenized_label_ids += [-100] * (max_length - len(tokenized_label_ids))
+        kwparams = {**kwparams, 'padding':'do_not_pad'}
+        #kwparams = {'return_tensors':'np', **kwparams, 'padding':'longest'}
+        input_ids = tokenizer(text = sample[input_col], **kwparams)['input_ids']
+        label_ids = tokenizer(text = sample[label_col], **kwparams)['input_ids']
+        if self.one_time:
+            print('input and label concatenation has a lot of room for speed optimization')
+            self.one_time = False
+        input_and_label_ids = [*zip(input_ids, label_ids)]
+        for input_ids, label_ids in input_and_label_ids:
+            if len(input_ids) >= max_length:
+        #if len(input_tok[0]) >= max_length:
+                print('warning: item length leaves no room for generation within max length')
+        tokenized_input_ids = [
+            (input_ids + label_ids[:-1] + [tokenizer.pad_token_id] * max(max_length + 1 - len(input_ids) - len(label_ids), 0))[:max_length]
+            for input_ids, label_ids in input_and_label_ids
+        ]
+        tokenized_attention_mask = [
+            ([1] * (len(input_ids) + len(label_ids) - 1) + [0] * max(max_length + 1 - len(input_ids) - len(label_ids), 0))[:max_length]
+            for input_ids, label_ids in input_and_label_ids
+        ]
+        tokenized_label_ids = [
+            ([-100] * (len(input_ids) - 1) + label_ids + [-100] * max(max_length + 1 - len(input_ids) - len(label_ids), 0))[:max_length]
+            for input_ids, label_ids in input_and_label_ids
+        ]
         return {
             'input_ids': tokenized_input_ids,
             'attention_mask': tokenized_attention_mask,
@@ -199,9 +216,23 @@ my_trainer = ComposerTrainer(composer_model, tokenizer, optimizer, linear_lr_dec
 
 # Tokenize SST-2
 # Split dataset into train and validation sets
+import pdb; pdb.set_trace()
 sst2_dataset = datasets.load_dataset('glue', 'sst2')
 #tokenized_sst2 = my_trainer.dataset_tokenize_col(sst2_dataset, 'sentence')
-tokenized_sst2 = my_trainer.dataset_tokenize(sst2_dataset, 'sentence', 'sentence', remove_cols=['idx'])
+def int2str(sample, features, col):
+    feature = features[col]
+    names = feature.names
+    return {
+        #'label': sst2_dataset['train'].features['label'].int2str(sample['label'])
+        col: [
+            '' if val == -1 else names[val]
+            for val in sample[col]
+        ]
+    }
+#sst2_dataset = sst2_dataset.map(sst2_dataset['train'].features['label'].int2str, batched=True, num_proc=multiprocessing.cpu_count(), batch_size=1000)
+sst2_dataset = sst2_dataset.map(int2str, batched=True, num_proc=multiprocessing.cpu_count(), batch_size=1000, fn_kwargs={'features':sst2_dataset['train'].features, 'col':'label'})
+#sst2_dataset = sst2_dataset.map(label2labelstr, batched=True, num_proc=multiprocessing.cpu_count(), batch_size=1000)
+tokenized_sst2 = my_trainer.dataset_tokenize(sst2_dataset, 'sentence', 'label', remove_cols=['idx'])
 train_dataspec, eval_dataspec = my_trainer.process_data(tokenized_sst2['train']), my_trainer.process_data(tokenized_sst2['validation'])
 
 my_trainer.fit(train_dataspec, eval_dataspec, num_batches=15)#0)
