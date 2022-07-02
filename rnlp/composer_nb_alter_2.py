@@ -81,16 +81,7 @@ if tokenizer.pad_token_id is None:
     else:
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
-# for providing the labels, we'll probably want a dataset function that converts text to them.
-# if we only care about the text generated after, then the input data would be the whole sequence with the generation,
-# and the labels would have the nontrained prompt masked away.
-# i think the mask is -100
-
-# i'm guessing this could happen a few different ways
-# maybe two ways could be training on the whole text, and training on appended text
-# with appending, there would be two columns , and they would be concatenated
-
-# Package as a composer moel
+# Package as a composer model
 composer_model = ComposerBERT(model)
 
 import datasets
@@ -108,62 +99,55 @@ class ComposerTrainer:
         self.batch_size = batch_size
 
     def dataset_tokenize(self, dataset, input_col, label_col=None, remove_cols=[], **kwparams):
-        tokenizer = self.tokenizer
         kwparams = {'padding':'max_length', 'max_length':256, **kwparams}
         remove_cols = [*remove_cols, input_col]
         if label_col is None:
-            def tokenize(sample):
-                return tokenizer(
-                    text=sample[input_col],
-                    **kwparams
-                )
+            tokenizer = self._tokenize_input
         elif label_col == input_col:
             remove_cols = [*remove_cols, 'label']
-            kwparams = {'return_tensors':'np', 'max_length':kwparams['max_length']+1,**kwparams}
-            def tokenize(sample):
-                tokenized = tokenizer(
-                    text=sample[input_col],
-                    **kwparams
-                )
-                tokenized['label_ids'] = tokenized['input_ids'][...,1:].copy()
-                tokenized['label_ids'][tokenized['attention_mask'][...,1:] == 0] = -100
-                tokenized['input_ids'] = tokenized['input_ids'][...,:-1]
-                tokenized['attention_mask'] = tokenized['attention_mask'][...,:-1]
-                return tokenized
+            tokenizer = self._tokenize_input_as_labels
         else:
             remove_cols = [*remove_cols, label_col, 'label']
-            def tokenize(sample):
-                # here we concatenate the input and label ids as if labels follow input, such that only the labels are trained on
-                input_ids = tokenizer(
-                    text=sample[input_col],
-                    **kwparams
-                )
-                label_ids = tokenizer(
-                    text=sample[label_col],
-                    **kwparams
-                )
-                #max_length = max((len(input_ids) + len(label_ids) - 1) for input_ids, label_ids in zip(input_ids['input_ids'], label_ids['input_ids']))
-                max_length = kwparams['max_length']
-                if len(input_ids) >= max_length:
-                    print('warning: item length leaves no room for generation within max length')
-                tokenized_input_ids = input_ids + label_ids[:-1][:max_length]
-                tokenized_input_ids += [tokenizer.pad_token_id] * (max_length - len(tokenized_input_ids))
-                tokenized_attention_mask = [1] * min(len(input_ids) + len(label_ids) - 1, max_length)
-                tokenized_attention_mask += [0] * (max_length - len(tokenized_attention_mask))
-                tokenized_label_ids = ([-100] * (len(input_ids) - 1) + label_ids)[:max_length]
-                tokenized_label_ids += [-100] * (max_length - len(tokenized_label_ids))
-                return {
-                    'input_ids': tokenized_input_ids,
-                    'attention_mask': tokenized_attention_mask,
-                    'label_ids': tokenized_label_ids
-                }
-        return dataset.map(tokenize, batched=True, num_proc=multiprocessing.cpu_count(), batch_size=1000, remove_columns=remove_cols)
+            tokenizer = self._tokenize_input_concat_labels
+            kwparams = {'label_col':label_col,**kwparams}
+        return dataset.map(tokenizer, batched=True, num_proc=multiprocessing.cpu_count(), batch_size=1000, remove_columns=remove_cols, fn_kwargs={'tokenizer':self.tokenizer, 'input_col':input_col, **kwparams})
+
+    # these are static methods because the datasets library performs caching based on hashes of them
+    @staticmethod
+    def _tokenize_input(sample, *, tokenizer, input_col, **kwparams):
+        return tokenizer(text = sample[input_col], **kwparams)
+    @staticmethod
+    def _tokenize_input_as_labels(sample, *, tokenizer, input_col, **kwparams):
+        kwparams = {'return_tensors':'np', 'max_length':kwparams['max_length']+1,**kwparams}
+        tokenized = tokenizer(text = sample[input_col], **kwparams)
+        tokenized['label_ids'] = tokenized['input_ids'][...,1:].copy()
+        tokenized['label_ids'][tokenized['attention_mask'][...,1:] == 0] = -100
+        tokenized['input_ids'] = tokenized['input_ids'][...,:-1]
+        tokenized['attention_mask'] = tokenized['attention_mask'][...,:-1]
+        return tokenized
+    @staticmethod
+    def _tokenize_input_concat_labels(sample, *, tokenizer, input_col, label_col, **kwparams):
+        # here we concatenate the input and label ids as if labels follow input, such that only the labels are trained on
+        input_ids = tokenizer(text = sample[input_col], **kwparams)
+        label_ids = tokenizer(text = sample[label_col], **kwparams)
+        max_length = kwparams['max_length']
+        if len(input_ids) >= max_length:
+            print('warning: item length leaves no room for generation within max length')
+        tokenized_input_ids = (input_ids + label_ids[:-1])[:max_length]
+        tokenized_input_ids += [tokenizer.pad_token_id] * (max_length - len(tokenized_input_ids))
+        tokenized_attention_mask = [1] * min(len(input_ids) + len(label_ids) - 1, max_length)
+        tokenized_attention_mask += [0] * (max_length - len(tokenized_attention_mask))
+        tokenized_label_ids = ([-100] * (len(input_ids) - 1) + label_ids)[:max_length]
+        tokenized_label_ids += [-100] * (max_length - len(tokenized_label_ids))
+        return {
+            'input_ids': tokenized_input_ids,
+            'attention_mask': tokenized_attention_mask,
+            'label_ids': tokenized_label_ids
+        }
 
     def process_data(self, dataset):
         data_collator = transformers.data.data_collator.default_data_collator
-        def data_collator_wrapper(*params, **kwparams):
-            return data_collator(*params, **kwparams)
-        dataloader = torch.utils.data.DataLoader(dataset, batch_size=self.batch_size, shuffle=False, drop_last=False, collate_fn=data_collator_wrapper)
+        dataloader = torch.utils.data.DataLoader(dataset, batch_size=self.batch_size, shuffle=False, drop_last=False, collate_fn=data_collator)
         dataspec = composer.core.DataSpec(dataloader=dataloader, split_batch=self._split_batch_dict)
         return dataspec
 
@@ -208,7 +192,7 @@ optimizer = torch.optim.AdamW(
 )
 linear_lr_decay = torch.optim.lr_scheduler.LinearLR(
     optimizer, start_factor=1.0,
-    end_factor=0, total_iters=150
+    end_factor=0, total_iters=15#0
 )
 
 my_trainer = ComposerTrainer(composer_model, tokenizer, optimizer, linear_lr_decay, batch_size=16)
@@ -220,7 +204,7 @@ sst2_dataset = datasets.load_dataset('glue', 'sst2')
 tokenized_sst2 = my_trainer.dataset_tokenize(sst2_dataset, 'sentence', 'sentence', remove_cols=['idx'])
 train_dataspec, eval_dataspec = my_trainer.process_data(tokenized_sst2['train']), my_trainer.process_data(tokenized_sst2['validation'])
 
-my_trainer.fit(train_dataspec, eval_dataspec)
+my_trainer.fit(train_dataspec, eval_dataspec, num_batches=15)#0)
 
 eval_batch = next(iter(eval_dataspec.dataloader))
 predictions = my_trainer.predict(eval_batch)
