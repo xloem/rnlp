@@ -240,7 +240,7 @@ sst2_dataset = sst2_dataset.map(int2str, batched=True, num_proc=multiprocessing.
 tokenized_sst2 = my_trainer.dataset_tokenize(sst2_dataset, 'sentence', 'label', remove_cols=['idx'])
 train_dataspec, eval_dataspec = my_trainer.process_data(tokenized_sst2['train']), my_trainer.process_data(tokenized_sst2['validation'])
 
-fit_trainer = my_trainer.fit(train_dataspec, eval_dataspec, num_batches=55)#1, num_eval_batches=1)#55)#150)
+fit_trainer = my_trainer.fit(train_dataspec, eval_dataspec, num_batches=150)
 
 eval_batch = next(iter(eval_dataspec.dataloader))
 predictions = my_trainer.predict(eval_batch)
