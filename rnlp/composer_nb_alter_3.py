@@ -128,7 +128,8 @@ def GPTLanguageAlgorithms(
     mask_replacement_function='composer.algorithms.alibi._gpt2_alibi.enlarge_mask',
     max_sequence_length=8192,
     # train_sequence_length_scaling should be > 0.03126 and > sequence_length / 256
-    train_sequence_length_scaling=0.25 # for 1024-length'd input data
+    train_sequence_length_scaling=0.25, # for 1024-length'd input data
+    heads_per_layer=None
 ):
     assert max_seq_length * train_sequence_length_scaling >= 256
     assert train_sequence_length_scaling >= 0.03125
@@ -140,7 +141,8 @@ def GPTLanguageAlgorithms(
             alibi_attention=alibi_attention,
             mask_replacement_function=mask_replacement_function,
             max_sequence_length=max_sequence_length,
-            train_sequence_length_scaling=train_sequence_length_scaling
+            train_sequence_length_scaling=train_sequence_length_scaling,
+            heads_per_layer=heads_per_layer,
         ),
         composer.algorithms.SeqLengthWarmup(
             min_seq_length = min_seq_length,
@@ -152,16 +154,19 @@ def GPTLanguageAlgorithms(
     ]
 
 def OPTLanguageAlgorithms( # OptForCausalLM
+    config,
+    mask_replacement_function=None, # todo. this expands this casual mask or such so that larger sequence lengths can be processed
     position_embedding_attribute='module.model.decoder.embed_positions',
     attention_module_name='transformers.models.opt.modeling_opt.OPTAttention',
     attr_to_replace='self_attn',
     **kwparams
 ):
     return GPTLanguageAlgorithms(
+        mask_replacement_function=mask_replacement_function,
         position_embedding_attribute=position_embedding_attribute,
         attention_module_name=attention_module_name,
         attr_to_replace=attr_to_replace,
-        **kwparams
+        **{'heads_per_layer':config.num_attention_heads, **kwparams}
     )
 
 class ComposerTrainer:
@@ -317,7 +322,7 @@ sst2_dataset = sst2_dataset.map(int2str, batched=True, num_proc=multiprocessing.
 tokenized_sst2 = my_trainer.dataset_tokenize(sst2_dataset, 'sentence', 'label', remove_cols=['idx'])
 train_dataspec, eval_dataspec = my_trainer.process_data(tokenized_sst2['train']), my_trainer.process_data(tokenized_sst2['validation'])
 
-fit_trainer = my_trainer.fit(train_dataspec, eval_dataspec, num_batches=150, algorithms=OPTLanguageAlgorithms(max_seq_length=256,train_sequence_length_scaling=1))
+fit_trainer = my_trainer.fit(train_dataspec, eval_dataspec, num_batches=150, algorithms=OPTLanguageAlgorithms(composer_model.config, max_seq_length=256,train_sequence_length_scaling=1))
 
 eval_batch = next(iter(eval_dataspec.dataloader))
 predictions = my_trainer.predict(eval_batch)
